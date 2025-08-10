@@ -1,3 +1,4 @@
+// src/App.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { nanoid } from "nanoid";
 import { envReady, joinRoom } from "./realtime";
@@ -73,7 +74,6 @@ function aiPick(validMoves, board, aiSide) {
 }
 
 export default function ReversiApp() {
-  // core game state
   const [board, setBoard] = useState(initBoard);
   const [turn, setTurn] = useState(BLACK);
   const [history, setHistory] = useState([]);
@@ -81,11 +81,9 @@ export default function ReversiApp() {
   const [lastMove, setLastMove] = useState(null);
   const [gameOver, setGameOver] = useState(false);
 
-  // local modes
   const [vsAI, setVsAI] = useState(true);
   const [aiSide, setAiSide] = useState(WHITE);
 
-  // online mode
   const [online, setOnline] = useState(false);
   const [roomId, setRoomId] = useState("");
   const [myColor, setMyColor] = useState(BLACK);
@@ -95,15 +93,11 @@ export default function ReversiApp() {
 
   const validMoves = useMemo(() => getValidMoves(board, turn), [board, turn]);
 
-  useEffect(() => {
-    if (!message) return; const t = setTimeout(() => setMessage(""), 1800); return () => clearTimeout(t);
-  }, [message]);
+  useEffect(() => { if (!message) return; const t = setTimeout(() => setMessage(""), 1800); return () => clearTimeout(t); }, [message]);
 
-  // AI move
+  // 簡單 AI：輪到 AI 時自動落子
   useEffect(() => {
-    if (online) return;
-    if (!vsAI) return;
-    if (turn !== aiSide) return;
+    if (online || !vsAI || turn !== aiSide) return;
     const moves = getValidMoves(board, turn);
     let cancelled = false;
     const doAI = async () => {
@@ -118,33 +112,43 @@ export default function ReversiApp() {
       const key = aiPick(moves, board, turn) || [...moves.keys()][0];
       const [r, c] = key.split(",").map(Number);
       const flips = moves.get(key);
-      pushMove(r, c, flips);
+      const res = pushMove(r, c, flips);
+      if (online && roomRef.current) {
+        roomRef.current.sendMove({ r, c });
+        roomRef.current.sendSync({ board: res.board, turn: res.turn, lastMove: [r, c] });
+      }
     };
     doAI();
     return () => { cancelled = true; };
   }, [online, vsAI, aiSide, turn, board]);
 
   function pushMove(r, c, flips) {
-    setHistory(h => [...h, { board: cloneBoard(board), turn }]);
-    const nb = applyMove(board, r, c, turn, flips);
-    setBoard(nb); setLastMove([r, c]);
-    const next = opponent(turn);
+    const prevTurn = turn;
+    setHistory(h => [...h, { board: cloneBoard(board), turn: prevTurn }]);
+    const nb = applyMove(board, r, c, prevTurn, flips);
+    const next = opponent(prevTurn);
     const nextMoves = getValidMoves(nb, next);
+    let finalTurn = next;
     if (nextMoves.size === 0) {
-      const backToYou = getValidMoves(nb, turn);
-      if (backToYou.size === 0) setGameOver(true);
-      else { setMessage("對手無合法步，換你。"); setTurn(turn); }
-    } else setTurn(next);
+      const backToYou = getValidMoves(nb, prevTurn);
+      if (backToYou.size === 0) { setGameOver(true); finalTurn = prevTurn; }
+      else { setMessage("對手無合法步，換你。"); finalTurn = prevTurn; }
+    }
+    setBoard(nb); setLastMove([r, c]); setTurn(finalTurn);
+    return { board: nb, turn: finalTurn };
   }
 
   function placeMove(r, c) {
     if (gameOver) return;
     const key = `${r},${c}`;
     if (!validMoves.has(key)) return;
+
     const flips = validMoves.get(key);
-    pushMove(r, c, flips);
+    const res = pushMove(r, c, flips);
+
     if (online && roomRef.current) {
       roomRef.current.sendMove({ r, c });
+      roomRef.current.sendSync({ board: res.board, turn: res.turn, lastMove: [r, c] });
     }
   }
 
@@ -169,7 +173,6 @@ export default function ReversiApp() {
     setGameOver(false);
   }
 
-  // --- online helpers ---
   function createRoom() {
     if (!envOk) { alert("未設定 Supabase 環境變數。"); return; }
     const id = nanoid(6);
@@ -189,9 +192,10 @@ export default function ReversiApp() {
     const r = joinRoom(id, onRemoteEvent, onPresence);
     roomRef.current = r; setRoomId(id); setOnline(true); setVsAI(false);
     handleRestart();
-    r.sendSync({ need: true });
+    r.sendSync({ need: true }); // 向主機索取快照
   }
 
+  // 支援直接用 ?room=xxx 進房
   useEffect(() => {
     const p = new URLSearchParams(location.search);
     const rid = p.get("room"); const as = p.get("as");
@@ -200,6 +204,7 @@ export default function ReversiApp() {
 
   function onRemoteEvent(type, payload) {
     if (type === "move") {
+      // 只在輪到「對手」時才套用對方的落子
       if (turn !== opponent(myColor)) return;
       const { r, c } = payload;
       const key = `${r},${c}`;
@@ -219,13 +224,14 @@ export default function ReversiApp() {
     }
   }
 
+  // presence → 正確統計全部 metas
   function onPresence(state) {
-    const keys = new Set();
-    Object.values(state).forEach(arr => arr.forEach(v => keys.add(v.key)));
-    setPeers(keys.size);
+    const count = Object.values(state || {}).reduce((n, arr) => n + arr.length, 0);
+    setPeers(count);
   }
 
   const scores = useMemo(() => countScore(board), [board]);
+
   const hintKey = useMemo(() => {
     const moves = getValidMoves(board, turn);
     if (moves.size === 0) return null;
@@ -248,6 +254,7 @@ export default function ReversiApp() {
           <div>
             <h1 className="text-3xl sm:text-4xl font-bold tracking-tight">Reversi <span className="opacity-80">/</span> 黑白棋</h1>
             <p className="text-slate-400 mt-1">支援本地、電腦對戰，以及 <span className="text-emerald-300 font-semibold">線上房間</span>。</p>
+            {online && <p className="text-xs text-slate-400 mt-1">房號：<span className="font-mono">{roomId}</span> ・ 連線人數：{peers}</p>}
           </div>
           <div className="flex items-center gap-2">
             <Badge color={BLACK} value={scores.black} label="Black" active={turn === BLACK} />
@@ -303,10 +310,6 @@ export default function ReversiApp() {
                       />
                       <Btn title="加入" onClick={() => joinRoomById(roomId, WHITE)} />
                     </div>
-                    <p className="text-sm text-slate-400">
-                      你的顏色：<span className="font-semibold">{myColor === BLACK ? "Black" : "White"}</span> ・
-                      在線人數：{peers}
-                    </p>
                   </div>
                 )}
               </div>
@@ -405,7 +408,6 @@ function Board({ board, validMoves, hintKey, lastMove, onClickCell, disabled }) 
 }
 
 function Cell({ r, c, value, legal, isHint, lastMove, onClick }) {
-  const EMPTY = 0;
   return (
     <button
       onClick={onClick}
@@ -428,7 +430,7 @@ function Cell({ r, c, value, legal, isHint, lastMove, onClick }) {
 }
 
 function Disc({ color, lastMove }) {
-  const isBlack = color === 1;
+  const isBlack = color === BLACK;
   return (
     <div
       className={[
@@ -443,7 +445,7 @@ function Disc({ color, lastMove }) {
 }
 
 function Badge({ color, value, label, active }) {
-  const isBlack = color === 1;
+  const isBlack = color === BLACK;
   return (
     <div
       className={[
@@ -493,7 +495,7 @@ function Toggle({ labelLeft, labelRight, enabled, onChange, disabled }) {
 }
 function Btn({ title, onClick, icon: Icon, variant = "solid", disabled }) {
   const base = "inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm transition focus:outline-none disabled:opacity-50 disabled:pointer-events-none";
-  const style = variant === "ghost" ? "bg-transparent hover:bg白/5 border border-slate-700" : "bg-emerald-600 hover:bg-emerald-500 text-white";
+  const style = variant === "ghost" ? "bg-transparent hover:bg-white/5 border border-slate-700" : "bg-emerald-600 hover:bg-emerald-500 text-white";
   return (
     <button className={[base, style].join(" ")} onClick={onClick} disabled={disabled}>
       {Icon && <Icon className="h-4 w-4" />}<span>{title}</span>
