@@ -232,12 +232,7 @@ export default function ReversiApp() {
 
   const scores = useMemo(() => countScore(board), [board]);
 
-  const hintKey = useMemo(() => {
-    const moves = getValidMoves(board, turn);
-    if (moves.size === 0) return null;
-    if (online && turn !== myColor) return null;
-    return aiPick(moves, board, turn);
-  }, [board, turn, online, myColor]);
+  const hintKey = null;
 
   const winner = useMemo(() => {
     if (!gameOver) return null;
